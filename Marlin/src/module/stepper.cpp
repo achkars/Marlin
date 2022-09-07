@@ -97,6 +97,10 @@ Stepper stepper; // Singleton
 #include "../MarlinCore.h"
 #include "../HAL/shared/Delay.h"
 
+#if ENABLED(BD_SENSOR)
+  #include "../feature/bedlevel/bdl/bdl.h"
+#endif
+
 #if ENABLED(INTEGRATED_BABYSTEPPING)
   #include "../feature/babystep.h"
 #endif
@@ -131,6 +135,10 @@ Stepper stepper; // Singleton
 
 #if ENABLED(EXTENSIBLE_UI)
   #include "../lcd/extui/ui_api.h"
+#endif
+
+#if ENABLED(I2S_STEPPER_STREAM)
+  #include "../HAL/ESP32/i2s.h"
 #endif
 
 // public:
@@ -1345,7 +1353,7 @@ void Stepper::set_directions() {
     }
 
     FORCE_INLINE int32_t Stepper::_eval_bezier_curve(const uint32_t curr_step) {
-      #if (defined(__arm__) || defined(__thumb__)) && !defined(STM32G0B1xx) // TODO: Test define STM32G0xx versus STM32G0B1xx
+      #if (defined(__arm__) || defined(__thumb__)) && __ARM_ARCH >= 6 && !defined(STM32G0B1xx) // TODO: Test define STM32G0xx versus STM32G0B1xx
 
         // For ARM Cortex M3/M4 CPUs, we have the optimized assembler version, that takes 43 cycles to execute
         uint32_t flo = 0;
@@ -1554,14 +1562,7 @@ void Stepper::isr() {
      * On AVR the ISR epilogue+prologue is estimated at 100 instructions - Give 8µs as margin
      * On ARM the ISR epilogue+prologue is estimated at 20 instructions - Give 1µs as margin
      */
-    min_ticks = HAL_timer_get_count(MF_TIMER_STEP) + hal_timer_t(
-      #ifdef __AVR__
-        8
-      #else
-        1
-      #endif
-      * (STEPPER_TIMER_TICKS_PER_US)
-    );
+    min_ticks = HAL_timer_get_count(MF_TIMER_STEP) + hal_timer_t(TERN(__AVR__, 8, 1) * (STEPPER_TIMER_TICKS_PER_US));
 
     /**
      * NB: If for some reason the stepper monopolizes the MPU, eventually the
@@ -2468,18 +2469,19 @@ uint32_t Stepper::block_phase_isr() {
     // the acceleration and speed values calculated in block_phase_isr().
     // This helps keep LA in sync with, for example, S_CURVE_ACCELERATION.
     la_delta_error += la_dividend;
-    if (la_delta_error >= 0) {
+    const bool step_needed = la_delta_error >= 0;
+    if (step_needed) {
       count_position.e += count_direction.e;
       la_advance_steps += count_direction.e;
       la_delta_error -= advance_divisor;
 
       // Set the STEP pulse ON
-      #if ENABLED(MIXING_EXTRUDER)
-        E_STEP_WRITE(mixer.get_next_stepper(), !INVERT_E_STEP_PIN);
-      #else
-        E_STEP_WRITE(stepper_extruder, !INVERT_E_STEP_PIN);
-      #endif
+      E_STEP_WRITE(TERN(MIXING_EXTRUDER, mixer.get_next_stepper(), stepper_extruder), !INVERT_E_STEP_PIN);
+    }
 
+    TERN_(I2S_STEPPER_STREAM, i2s_push_sample());
+
+    if (step_needed) {
       // Enforce a minimum duration for STEP pulse ON
       #if ISR_PULSE_CONTROL
         USING_TIMED_PULSE();
@@ -2488,11 +2490,7 @@ uint32_t Stepper::block_phase_isr() {
       #endif
 
       // Set the STEP pulse OFF
-      #if ENABLED(MIXING_EXTRUDER)
-        E_STEP_WRITE(mixer.get_stepper(), INVERT_E_STEP_PIN);
-      #else
-        E_STEP_WRITE(stepper_extruder, INVERT_E_STEP_PIN);
-      #endif
+      E_STEP_WRITE(TERN(MIXING_EXTRUDER, mixer.get_stepper(), stepper_extruder), INVERT_E_STEP_PIN);
     }
   }
 
